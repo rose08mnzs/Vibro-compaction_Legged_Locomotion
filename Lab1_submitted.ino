@@ -26,12 +26,12 @@ float gait_deg[]={0,0,180,180};  //gait in deg; [RF,LF,LR,RR]; the value for RF 
 int Leg_zeroing_offset[]={60,60,60,60}; //zeroing calibration offset in deg; leg angular position, ϕ, is defined as the angle measured clockwise about the axle from the upward vertical to the leg position, in radians. A zeroing calibration offset is needed because the servo’s zero position is not vertically downward and there is the offset between the servo-leg connector and the servo.  
                                         //by default is 60, which means when position command is 0, all legs should be pointing vertically upward.  
 
-
+// NEW FOR PROJECT
 float vibrate_duration = 0.5; // seconds to pause and vibrate
 float vibrate_amplitude = 5.0; // degrees of amplitude for the vibration
 float vibrate_frequency = 10.0; // Hz (cycles per second)
 float time_vibrate_end; // will be calculated in clock_init()
-
+// END FOR PROJECT
 //clock parameters belows need to be calculated in clock_init()///////////////////////////////////////////////
 float time_slow_start=1; // in seconds, time after the start of the period that the the leg enters the slow phase.
 float time_slow_end=3; // in seconds, time after the start of the period that the the leg exits the slow phase.
@@ -55,8 +55,6 @@ const float RAD2DEG = 180/3.1415;
 
 //change code to return desired speed in slow phase
 float omega_slow(){ 
-    
-  
   return RAD2DEG* phi_s/(d_c*clock_period); //FIXME ;  //return desired leg speed in slow phase in deg/s
 }
 
@@ -77,11 +75,12 @@ void clock_init() {
   time_slow_start   = slow_start_deg / omega_fast();        
 
   // 2. Vibration phase ends here (New!)
+  // NEW FOR PROJECT
   time_vibrate_end  = time_slow_start + vibrate_duration; 
 
   // 3. Slow phase ends here (Pushed back by vibration duration)
   time_slow_end     = time_vibrate_end + (d_c * (clock_period - vibrate_duration));
-
+  // END FOR PROJECT
   degree_slow_start = slow_start_deg;
   degree_slow_end   = slow_end_deg;
 }
@@ -99,6 +98,7 @@ float get_desired_angle(int leg, long elapsed) {
     }
     
     // Phase 2: Vibrate Phase (Pre-Stance Compaction)
+    // NEW FOR PROJECT
     else if (time_sec < time_vibrate_end){
       // Calculate how far into the vibration phase we are
       float t_vib = time_sec - time_slow_start; 
@@ -106,13 +106,15 @@ float get_desired_angle(int leg, long elapsed) {
       // Hold at the start position, but superimpose a high-frequency sine wave
       angle = degree_slow_start + vibrate_amplitude * sin(2 * 3.14159 * vibrate_frequency * t_vib);
     }
+    // END FOR PROJECT
     
     // Phase 3: Slow Phase (Stance/Push)
+    // NEW FOR PROJECT (PUSHED THE SLOW PHASE BACK)
     else if (time_sec < time_slow_end){
       // Resume slow phase smoothly from where we paused
       angle = degree_slow_start + omega_slow() * (time_sec - time_vibrate_end);
     }
-    
+    // END FOR PROJECT
     // Phase 4: Fast Phase (Return to top)
     else{
       angle = degree_slow_end + omega_fast() * (time_sec - time_slow_end) ;
