@@ -1,0 +1,290 @@
+
+
+#include <DynamixelShield.h>
+#include <stdlib.h>
+#if defined(ARDUINO_AVR_UNO) || defined(ARDUINO_AVR_MEGA2560)
+  #include <SoftwareSerial.h>
+  SoftwareSerial soft_serial(7, 8); // DYNAMIXELShield UART RX/TX
+  #define DEBUG_SERIAL soft_serial
+#elif defined(ARDUINO_SAM_DUE) || defined(ARDUINO_SAM_ZERO)
+  #define DEBUG_SERIAL SerialUSB    
+#else
+  #define DEBUG_SERIAL Serial
+#endif
+const float DXL_PROTOCOL_VERSION = 2.0;
+DynamixelShield dxl;
+
+int total_legs=4; //number of legs
+
+uint8_t IDs[]={3,2,30,4}; // Leg ID corresponding to [RF,LF,LR,RR] legs.  if not changed, leg RF= ID 1, leg LF= ID 2, leg LR= ID 3, leg RR= ID 4; 
+uint8_t Directions[]={1,0,0,1}; //{0, 1, 1, 0} Leg rotating direction corresponding to [RF,LF,LR,RR]; value=0 then rotate CCW, value=1 then rotate CW; If not changed, leg RF and leg RR will rotate CCW, and leg LF and leg LR will rotate CW; 
+//Bound {0.0, 0.5, 0.5}
+//Trot {0.5, 0.0, 0.5}
+//Walk {0.5, 0.25, 0.75}
+float gait[]={0.5, 0.25, 0.75}; // (\phi_1, \phi_2, \phi_3) = [LF-RF,LR-RF,RR-RF]; 
+float gait_deg[]={0,0,180,180};  //gait in deg; [RF,LF,LR,RR]; the value for RF will always be 0, the value for LF= 360*\phi_1, LR=360*\phi_2, RR=360*\phi_3; calculated in translate_gait_deg();
+float leg_phase[4];
+int Leg_zeroing_offset[]={52,69,64,55}; //zeroing calibration offset in deg; leg angular position, ϕ, is defined as the angle measured clockwise about the axle from the upward vertical to the leg position, in radians. A zeroing calibration offset is needed because the servo’s zero position is not vertically downward and there is the offset between the servo-leg connector and the servo.  
+                                        //by default is 60, which means when position command is 0, all legs should be pointing vertically upward.  
+// --------------------
+// PROJECT VIBRATION SETTINGS
+// --------------------
+bool use_vibration = true;
+float vibrate_duration = 0.6; //0.5    // seconds
+float vibrate_amplitude = 5.0;  //3.0  // degrees
+float vibrate_frequency = 10.0; //8.0  // Hz
+
+//clock parameters belows need to be calculated in clock_init()///////////////////////////////////////////////
+float time_slow_start=1; // in seconds, time after the start of the period that the the leg enters the slow phase.
+float time_slow_end=3; // in seconds, time after the start of the period that the the leg exits the slow phase.
+float time_vibrate_end = 1.5;
+
+float degree_slow_start=150; //in deg, the slow phase starting position
+float degree_slow_end=210; //in deg, the slow phase starting position, if degree_slow_start=150 and degree_slow_end=210, this means whenever the leg's position is between 150 and 210, it will be in the slow phase.  
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+//You can change the desired Buehler clock parameters here
+float phi_s=1.1;//1.7 //in rad, ϕ_s is the angular extent of the slow phase
+float phi_0=2.64;//PI +0.35 //PI+0.2 in rad, ϕ_0 is the center of the slow phase 
+float d_c=0.45;//0.65 d_c is the duty factor of the slow phase (i.e. fraction of the period spent in the slow phase). 
+float clock_period=4; //in seconds, time to complete 1 rotation
+
+// Dead-zone hysteresis
+const float ENTER_DEADZONE = 285.0;
+const float EXIT_DEADZONE  = 240.0;
+//change code to return desired speed in slow phase
+float omega_slow(){ 
+  float t_s = d_c * clock_period;
+  float phi_s_deg = phi_s * 180.0 / PI;
+  float omega_s = phi_s_deg / t_s;
+  return omega_s;   //return desired leg speed in slow phase in deg/s
+}
+
+
+//change code to return desired speed in fast phase
+float omega_fast(){  
+  float t_f = clock_period*(1-d_c);
+  float phi_s_deg = phi_s * 180.0 / PI;
+  float total_deg = 360.0;
+  float omega_f = (total_deg - phi_s_deg) / t_f;
+  return omega_f;  //return desired leg speed in fast phase in deg/s
+}
+float wrap360(float angle) {
+  while (angle >= 360.0) angle -= 360.0;
+  while (angle < 0.0) angle += 360.0;
+  return angle;
+}
+//configure your timing parameters
+void clock_init(){   
+  float phi_s_deg = phi_s * 180.0 / PI;
+  float phi_0_deg = phi_0 * 180.0 / PI;
+  degree_slow_start=  phi_0_deg - phi_s_deg / 2.0;//FIXME(optional)  //return the position that the the leg enters the slow phase in deg
+  //degree_slow_end= phi_0_deg + phi_s_deg / 2.0;//FIXME(optional)  //return the position that the the leg exits the slow phase in deg
+  
+  float t_slow = d_c * clock_period;
+  float omega_f = omega_fast();
+  float omega_s = omega_slow();
+  time_slow_start=  degree_slow_start / omega_f;//FIXME  //return the time after the start of the period that the the leg enters the slow phase
+  //time_slow_end=   time_slow_start + t_slow;//FIXME  //return the time after the start of the period that the the leg exits the slow phase
+ 
+  // Vibrate immediately before slow phase
+  if (vibrate_duration < 0.0) vibrate_duration = 0.0;
+  // Keep vibration inside the slow-phase window
+  if (vibrate_duration > t_slow) {
+    vibrate_duration = t_slow;
+  }
+  time_vibrate_end = time_slow_start + vibrate_duration;
+  time_slow_end = time_slow_start + t_slow;
+
+  // Make degree_slow_end match the actual slow-phase travel
+  degree_slow_end = degree_slow_start + omega_s * (time_slow_end - time_vibrate_end);
+
+  return;
+}
+void translate_gait_phase() {
+  leg_phase[0] = 0.0;      // RF
+  leg_phase[1] = gait[0]; // LF − RF
+  leg_phase[2] = gait[1]; // LR − RF
+  leg_phase[3] = gait[2]; // RR − RF
+}
+// compute desired motor angle at any time instance
+float get_desired_angle(int leg,                    // Robot's leg enum, in 0,1,2,3
+                   long elapsed               // time elapsed since start, in ms
+                   ) { // return the desired postion of the robot's leg given the leg number and the time elapsed in deg. It's an absolute position from 0 to 360. Don't use cumulative positions. It's ok to return positions in the deadzone (>300).    
+  float phase_shift = leg_phase[leg] * clock_period;
+  float t = fmod((elapsed / 1000.0) + phase_shift, clock_period);
+
+  float angle;
+
+  if (t < time_slow_start) {
+    float omega_f = omega_fast();
+    angle = omega_f * t;
+  }
+  // else if (t < time_slow_end) {
+  //   float omega_s = omega_slow();
+  //   angle = degree_slow_start + omega_s * (t - time_slow_start);
+  // }
+  // else {
+  //   float omega_f = omega_fast();
+  //   angle = degree_slow_end + omega_f * (t - time_slow_end);
+  // }
+  else if (use_vibration && t < time_vibrate_end) {
+    // short burst right before stance
+    float t_vib = t - time_slow_start;
+    angle = degree_slow_start +
+            vibrate_amplitude * sin(2.0 * PI * vibrate_frequency * t_vib);
+  }
+  else if (t < time_slow_end) {
+    float omega_s = omega_slow();
+    angle = degree_slow_start + omega_s * (t - time_vibrate_end);
+  }
+  else {
+    float omega_f = omega_fast();
+    angle = degree_slow_end + omega_f * (t - time_slow_end);
+  }
+
+  
+  // wrap to [0,360)
+  //while (angle >= 360) angle -= 360;
+  //while (angle < 0) angle += 360;
+        
+  return wrap360(angle); //in deg
+}
+
+// print desired motor position and associated elapsed time to debug serial
+void print_position(long t, int leg, float desired_pos){
+  float time_sec = t / 1000.0;
+  float t_norm  = fmod(time_sec, clock_period);  // wraps every 4s
+  //while (desired_pos >= 360) desired_pos -= 360;
+  //while (desired_pos < 0) desired_pos += 360; 
+  desired_pos= wrap360(desired_pos);
+  DEBUG_SERIAL.print(t_norm);   
+  DEBUG_SERIAL.print("\t");
+  DEBUG_SERIAL.print(leg);
+  DEBUG_SERIAL.print("\t");
+  DEBUG_SERIAL.println(desired_pos);
+        
+  return;
+}
+
+
+void translate_gait_deg(){ //calculate the value of the array 'gait_deg[]' 
+  //notice the unit of 'gait_deg[]' is in deg and has 4 elements
+  gait_deg[0]=0;  //RF
+  gait_deg[1]=gait[0]*360; //LF
+  gait_deg[2]=gait[1]*360; //LB
+  gait_deg[3]=gait[2]*360; //RB
+  
+   return;
+}
+
+int dead_zone_speed_tuning=-10; //adjustment to tune deadzone speed, MAGIC Variable as we are using position control outside the deadzone and speed control inside deadzone so the speed might be different; this variable is manually selected from observation, and it's ok that it's not working well.  
+//int different_direction_offset=-110; //adjustment to compensate position offset between 2 legs with different rotating direction. Another MAGIC variable that requires manual observation. 
+
+
+////////////////////////////////////////////// The code below should require none or minimal changes /////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+long start;
+
+void setup() {
+  // put your setup code here, to run once:
+  DEBUG_SERIAL.begin(115200);
+
+  // Set Port baudrate to 1000000bps. This has to match with DYNAMIXEL baudrate.
+  dxl.begin(1000000);
+  // Set Port Protocol Version. This has to match with DYNAMIXEL protocol version.
+  dxl.setPortProtocolVersion(DXL_PROTOCOL_VERSION);
+  // Get DYNAMIXEL information
+  
+  // Turn off torque when configuring items in EEPROM area
+  for (int i=0;i<total_legs;i++){
+    dxl.torqueOff(IDs[i]);
+    dxl.setOperatingMode(IDs[i], OP_POSITION);
+    dxl.torqueOn(IDs[i]);
+    delay(100);
+  }
+
+  start = millis();
+  clock_init();
+  translate_gait_deg(); 
+  translate_gait_phase();
+}
+
+
+long last_time=0;
+int time_step=20;//100
+bool in_dead_zone[]={0,0,0,0}; //0=not, 1=in
+
+
+
+void loop() {
+  // put your main code here, to run repeatedly:
+  
+  // Please refer to e-Manual(http://emanual.robotis.com/docs/en/parts/interface/dynamixel_shield/) for available range of value. 
+  // Set Goal Position in RAW value
+  long elapsed = millis() - start;
+  
+  
+  if (elapsed-last_time>time_step){
+    last_time=elapsed;
+    for (int i=0;i<total_legs;i++){
+      float desired_pos=get_desired_angle(i,elapsed);
+      if (Directions[i]==1) desired_pos=360.0-desired_pos;
+      
+       
+      print_position(elapsed, i,desired_pos);
+      desired_pos = desired_pos + Leg_zeroing_offset[i];
+     // desired_pos = wrap360(desired_pos);
+
+      if (in_dead_zone[i]==0){
+
+        
+        if (desired_pos<300)
+          dxl.setGoalPosition(IDs[i], desired_pos, UNIT_DEGREE);
+        else{
+          in_dead_zone[i]=1;
+
+          float present_speed=dxl.getPresentVelocity(IDs[i]);
+          dxl.torqueOff(IDs[i]);
+          dxl.setOperatingMode(IDs[i], OP_VELOCITY);
+          dxl.torqueOn(IDs[i]);
+          //1 rpm=6 deg/s=9 unit
+          //1 unit= 2/3 deg/s
+          delay(10);
+          if(Directions[i]==0)
+            dxl.setGoalVelocity(IDs[i], 1.5*omega_fast()+dead_zone_speed_tuning);
+          else
+            dxl.setGoalVelocity(IDs[i], 1024+1.5*omega_fast()+dead_zone_speed_tuning);
+          
+        }
+        delay(10);   
+      }
+      else{
+        int current_pos=dxl.getPresentPosition(IDs[i], UNIT_DEGREE);
+        bool flag_temp=0;
+        
+        
+        if(Directions[i]==0)
+            flag_temp=current_pos>20;
+         else
+            flag_temp=current_pos<280;
+          
+        
+        if (flag_temp && desired_pos>0 && desired_pos<300){
+          in_dead_zone[i]=0;
+          dxl.torqueOff(IDs[i]);
+          dxl.setOperatingMode(IDs[i], OP_POSITION);
+          dxl.torqueOn(IDs[i]);
+          //1 rpm=6 deg/s=9 unit
+          //1 unit= 2/3 deg/s
+          delay(10);
+          dxl.setGoalPosition(IDs[i], desired_pos, UNIT_DEGREE);
+        }
+        
+      }
+    }
+  }
+  
+}
