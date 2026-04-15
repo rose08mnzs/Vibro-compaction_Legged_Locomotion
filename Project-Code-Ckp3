@@ -45,8 +45,8 @@ float degree_slow_start = 150;
 float degree_slow_end = 210;
 
 // You can change the desired Buehler clock parameters here
-float phi_s = 1.1;  // rad
-float phi_0 = 2.64;  // rad
+float phi_s = 1.1;//1.1,1.2,1.3,1.4  // rad 63.0254 deg
+float phi_0 = 3;//2.64,2.76,2.84,2.93  // rad 151.2609 deg -dif 88.2355
 float d_c = 0.45;    // duty factor
 float clock_period = 4; // seconds
 
