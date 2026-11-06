@@ -149,7 +149,7 @@ Debug output depends on the board branch compiled into the sketch:
 For the Uno/Mega branch, output is not automatically routed to the standard USB Serial Monitor. Use the connection appropriate to the selected debug interface.
 
 ## Experiment configuration
-Change the following variables near the top of `Project.ino`, then compile and upload for each condition.
+Change the following variables near the top of `VibroCompactionCode.ino`, then compile and upload for each condition.
 
 ### Best tested vibration condition
 ```cpp
